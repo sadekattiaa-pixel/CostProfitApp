@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
@@ -75,6 +75,36 @@ class ExcelInvoiceImporter:
         return "" if value is None else str(value).strip()
 
     @staticmethod
+    def _parse_date(value) -> str:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        text = str(value or "").strip()
+        if not text:
+            return date.today().isoformat()
+        try:
+            return datetime.fromisoformat(text).date().isoformat()
+        except ValueError:
+            for pattern in ("%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(text, pattern).date().isoformat()
+                except ValueError:
+                    pass
+        raise ValueError("تاريخ الفاتورة غير صالح؛ استخدم YYYY-MM-DD.")
+
+    @staticmethod
+    def _positive(value) -> float:
+        number = Decimal(str(value or "0").strip())
+        if not number.is_finite() or number <= 0:
+            raise ValueError("الكميات والأسعار يجب أن تكون أرقامًا موجبة.")
+        result = float(number)
+        import math
+        if not math.isfinite(result) or result <= 0:
+            raise ValueError("القيمة أكبر من المسموح.")
+        return result
+
+    @staticmethod
     def _parse_pallet(value: Any) -> int | None:
         if value is None or str(value).strip() == "":
             return None
@@ -143,22 +173,22 @@ class ExcelInvoiceImporter:
                 }
 
                 try:
-                    purchase_price = float(cls.normalize(values.get(purchase_col, "0")) or 0)
-                    sale_price = float(cls.normalize(values.get(sale_col, "0")) or 0)
-                    if purchase_price <= 0 and sale_price > 0:
+                    purchase_price = cls._positive(values[purchase_col]) if purchase_col else None
+                    sale_price = cls._positive(values[sale_col]) if sale_col else None
+                    if purchase_col is None:
                         purchase_price = sale_price
-                    if sale_price <= 0 and purchase_price > 0:
+                    if sale_col is None:
                         sale_price = purchase_price
 
                     item = InvoiceRow(
                         invoice_no=cls.normalize(values.get(mapped["invoice_no"], "")),
-                        date=cls.normalize(values.get(mapped["date"], "")),
+                        date=cls._parse_date(values.get(mapped["date"], "")),
                         supplier=cls.normalize(values.get(mapped["supplier"], "")),
                         product=cls.normalize(values.get(mapped["product"], "")) or cls.normalize(values.get(mapped["product_code"], "")),
                         product_code=cls.normalize(values.get(mapped["product_code"], "")) or cls.normalize(values.get(mapped["product"], "")),
                         category=cls.normalize(values.get(mapped["category"], "")),
                         pattern=cls.normalize(values.get(mapped["pattern"], "")),
-                        qty=float(cls.normalize(values.get(mapped["qty"], "0")) or 0),
+                        qty=cls._positive(values.get(mapped["qty"], "0")),
                         unit_price=purchase_price,
                         purchase_price=purchase_price,
                         sale_price=sale_price,
@@ -202,6 +232,11 @@ class ExcelInvoiceImporter:
     @classmethod
     def _resolve_products(cls, report: ImportReport):
         from app.services.product_service import product_service
+        from app.services.supplier_service import supplier_service
+        from app.config import CATEGORIES, CATEGORIES_AR
+        suppliers = supplier_service.get_all()
+        category_map = dict(zip(CATEGORIES_AR, CATEGORIES))
+        category_map.update({item: item for item in CATEGORIES})
         index = {}
         for product in product_service.get_all():
             key = cls._product_key(product.get("name") or "")
@@ -212,7 +247,18 @@ class ExcelInvoiceImporter:
             number = row.row_number or fallback_number
             name = row.product or row.product_code
             key = cls._product_key(name)
-            candidates = index.get(key, []) if key else []
+            candidates = list(index.get(key, [])) if key else []
+            if row.pattern:
+                candidates = [p for p in candidates if product_service._normalize_name(p.get("pattern") or "") == product_service._normalize_name(row.pattern)]
+            if row.category:
+                candidates = [p for p in candidates if p["category"] == category_map.get(row.category)]
+            try:
+                supplier = supplier_service.resolve_reference(row.supplier, suppliers)
+            except Exception as exc:
+                errors.append(f"الصف {number}: {exc}")
+                continue
+            if supplier:
+                candidates = [p for p in candidates if p["supplier_id"] == supplier["id"]]
             if not key:
                 errors.append(f"الصف {number}: اسم الصنف فارغ أو لا يحتوي على حروف أو أرقام.")
             elif not candidates:
@@ -253,16 +299,17 @@ class ExcelInvoiceImporter:
                         errors.append(f"الصف {number}: تصنيف الصنف غير معروف: {row.category}.")
                     elif category != product["category"]:
                         errors.append(f"الصف {number}: تصنيف الصنف «{row.product}» لا يطابق التصنيف المسجل.")
-                grouped.setdefault(row.invoice_no, []).append(row)
+                if product:
+                    grouped.setdefault((product["supplier_id"], row.invoice_no), []).append(row)
             plans = []
             suppliers = supplier_service.get_all()
-            for invoice_no, rows in grouped.items():
+            for (_, invoice_no), rows in grouped.items():
                 first = rows[0]
                 products = [resolved.get(id(row)) for row in rows]
                 if any(product is None for product in products):
                     continue
                 supplier_ids = {product["supplier_id"] for product in products}
-                supplier = next((item for item in suppliers if item["name"].strip().casefold() == first.supplier.strip().casefold()), None)
+                supplier = supplier_service.resolve_reference(first.supplier, suppliers)
                 if len(supplier_ids) != 1:
                     for row, product in zip(rows, products):
                         errors.append(f"الصف {row.row_number or report.rows.index(row) + 2}: الصنف «{row.product}» تابع للمورد «{product['supplier_name']}»؛ أصناف الفاتورة ليست لمورد واحد.")
@@ -279,7 +326,10 @@ class ExcelInvoiceImporter:
                     "purchase_usd": float(row.purchase_price or row.unit_price or 0),
                     "sale_dzd": float(row.sale_price or row.unit_price or 0),
                 } for row, product in zip(rows, products)]
-                plans.append((invoice_no, supplier_id, first.date or date.today().isoformat(), items))
+                dates = {cls._parse_date(row.date) for row in rows}
+                if len(dates) != 1:
+                    errors.append(f"الفاتورة {invoice_no}: تواريخ الصفوف مختلفة.")
+                plans.append((invoice_no, supplier_id, cls._parse_date(first.date), items))
             if errors:
                 raise ValueError("لم يتم استيراد أي فاتورة:\n" + "\n".join(errors))
             for invoice_no, supplier_id, invoice_date, items in plans:

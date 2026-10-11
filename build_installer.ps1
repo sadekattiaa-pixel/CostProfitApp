@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
+$appVersion = (Select-String -LiteralPath (Join-Path $projectRoot "app\config.py") -Pattern '^APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 $appExe = Join-Path $projectRoot "dist\Invoice\Invoice.exe"
 $installerScript = Join-Path $projectRoot "installer\CostProfitApp.iss"
 
@@ -23,4 +24,4 @@ if (-not (Test-Path -LiteralPath $IsccPath)) {
 & $IsccPath $installerScript
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Installer completed: dist\installer\Invoice-Setup-1.1.0.exe"
+Write-Host "Installer completed: dist\installer\Invoice-Setup-$appVersion.exe"

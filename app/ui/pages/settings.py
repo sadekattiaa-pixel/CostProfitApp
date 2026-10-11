@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QDialogButtonBox, QSizePolicy, QApplication, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
 )
 
-from app.config import APP_NAME, APP_VERSION, APP_AUTHOR
+from app.config import APP_NAME, APP_VERSION, APP_AUTHOR, APP_COPYRIGHT, APP_COPYRIGHT_AR
 from app.services.settings_service import settings
 from app.services.product_service import product_service, ProductError
 from app.services.auth_service import auth, AuthError
@@ -188,6 +188,7 @@ class SettingsPage(QWidget):
     # إشارات للتواصل مع MainWindow
     language_changed = Signal(str)
     theme_changed = Signal(str)
+    backup_interval_changed = Signal(int)
 
     def __init__(self, theme="dark", language="en"):
         super().__init__()
@@ -613,7 +614,7 @@ class SettingsPage(QWidget):
         self.backup_interval_spin.setRange(5, 1440)
         self.backup_interval_spin.setValue(settings.get_int("auto_backup_minutes", 30))
         self.backup_interval_spin.valueChanged.connect(
-            lambda value: settings.set("auto_backup_minutes", value)
+            self._on_backup_interval_changed
         )
         self.backup_keep_lbl = self._make_field_label()
         self.backup_keep_spin = QSpinBox()
@@ -958,6 +959,12 @@ class SettingsPage(QWidget):
         author_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(author_lbl)
 
+        self.about_copyright = QLabel()
+        self.about_copyright.setObjectName("AboutCopyright")
+        self.about_copyright.setWordWrap(True)
+        self.about_copyright.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(self.about_copyright)
+
         layout.addWidget(card)
 
         # System info
@@ -1165,6 +1172,7 @@ class SettingsPage(QWidget):
         self.inv_next_lbl.setText(_t("next_invoice_no", lang))
 
         # About
+        self.about_copyright.setText(APP_COPYRIGHT_AR if lang == "ar" else APP_COPYRIGHT)
         self.about_data_lbl.setText(_t("data_location", lang))
         self.about_db_lbl.setText(_t("db_size", lang))
 
@@ -1224,6 +1232,10 @@ class SettingsPage(QWidget):
     # --------------------------------------------------------
     # Events
     # --------------------------------------------------------
+    def _on_backup_interval_changed(self, value):
+        settings.set("auto_backup_minutes", value)
+        self.backup_interval_changed.emit(value)
+
     def _on_language_changed(self):
         new_lang = self.gen_lang_combo.currentData()
         if new_lang and new_lang != self.language:
@@ -1273,28 +1285,32 @@ class SettingsPage(QWidget):
                                 "Only PNG/JPG allowed")
             return
 
-        # احذف الشعار القديم
         old = settings.get("company_logo") or ""
-        if old:
-            old_path = company_dir / old
-            try:
-                if old_path.exists():
-                    old_path.unlink()
-            except OSError:
-                pass
-
-        target_name = f"logo{ext}"
+        import uuid
+        from PIL import Image
+        target_name = "logo-" + uuid.uuid4().hex + ext
         target = company_dir / target_name
         try:
+            with Image.open(src) as image:
+                image.verify()
             shutil.copy2(src, target)
             settings.set("company_logo", target_name)
-            self._load_logo_preview()
-            QMessageBox.information(
-                self, _t("info_title", self.language),
-                _t("saved", self.language),
-            )
         except Exception as e:
+            target.unlink(missing_ok=True)
             QMessageBox.warning(self, _t("err_title", self.language), str(e))
+            return
+        if old:
+            old_path = (company_dir / old).resolve()
+            if company_dir.resolve() in old_path.parents:
+                try:
+                    from app.db import db
+                    coordinator = getattr(db, "_save_coordinator", None)
+                    action = lambda: old_path.unlink(missing_ok=True)
+                    coordinator.defer_cleanup(action) if coordinator is not None else action()
+                except OSError:
+                    pass
+        self._load_logo_preview()
+        QMessageBox.information(self, _t("info_title", self.language), _t("saved", self.language))
 
     def _on_remove_logo(self):
         old = settings.get("company_logo") or ""
@@ -1307,13 +1323,16 @@ class SettingsPage(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        try:
-            old_path = get_company_dir() / old
-            if old_path.exists():
-                old_path.unlink()
-        except OSError:
-            pass
         settings.set("company_logo", "")
+        old_path = (get_company_dir() / old).resolve()
+        if get_company_dir().resolve() in old_path.parents:
+            try:
+                from app.db import db
+                coordinator = getattr(db, "_save_coordinator", None)
+                action = lambda: old_path.unlink(missing_ok=True)
+                coordinator.defer_cleanup(action) if coordinator is not None else action()
+            except OSError:
+                pass
         self._load_logo_preview()
 
     def _on_change_password(self):
@@ -1353,6 +1372,9 @@ class SettingsPage(QWidget):
             pass
 
     def _on_change_backup_folder(self):
+        guard = getattr(self, "_pending_changes_guard", None)
+        if guard and not guard():
+            return
         selected = QFileDialog.getExistingDirectory(
             self, _t("backup_location", self.language), str(get_backups_dir())
         )
@@ -1371,6 +1393,9 @@ class SettingsPage(QWidget):
         QApplication.exit(RESTART_EXIT_CODE)
 
     def _on_change_data_folder(self):
+        guard = getattr(self, "_pending_changes_guard", None)
+        if guard and not guard():
+            return
         selected = QFileDialog.getExistingDirectory(
             self, _t("data_folder", self.language), str(get_default_data_dir())
         )
@@ -1427,6 +1452,9 @@ class SettingsPage(QWidget):
             QMessageBox.warning(self, _t("err_title", self.language), str(e))
 
     def _on_restore_backup(self, backup_path: Path):
+        guard = getattr(self, "_pending_changes_guard", None)
+        if guard and not guard():
+            return
         reply = QMessageBox.question(
             self, _t("confirm_title", self.language),
             _t("confirm_restore", self.language),

@@ -13,6 +13,13 @@ from app.paths import get_lock_file, get_machine_id, get_machine_name
 
 class LockInfo:
     def __init__(self, data: dict):
+        if not isinstance(data, dict) or any(
+            not isinstance(data.get(key, ""), str)
+            for key in ("machine_name", "machine_id", "owner_id", "user", "opened_at", "last_heartbeat", "app_version")
+        ):
+            raise ValueError("Invalid session lock")
+        if data.get("process_id") is not None and type(data["process_id"]) is not int:
+            raise ValueError("Invalid lock process")
         self.machine_name = data.get("machine_name", "?")
         self.machine_id = data.get("machine_id", "")
         self.owner_id = data.get("owner_id", "")
@@ -28,7 +35,7 @@ class LockInfo:
             last = datetime.fromisoformat(self.last_heartbeat)
         except (ValueError, TypeError):
             return True
-        return datetime.now() - last > timedelta(minutes=STALE_LOCK_THRESHOLD_MINUTES)
+        return datetime.now(last.tzinfo) - last > timedelta(minutes=STALE_LOCK_THRESHOLD_MINUTES)
 
     @property
     def is_same_machine(self) -> bool:
@@ -74,7 +81,7 @@ class LockService:
         try:
             data = json.loads(self._lock_path.read_text(encoding="utf-8"))
             return LockInfo(data)
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
             return None
 
     def check(self):
@@ -114,7 +121,7 @@ class LockService:
         except (OSError, json.JSONDecodeError):
             self._held = False
             return
-        if data.get("owner_id") != self._owner_id:
+        if not isinstance(data, dict) or data.get("owner_id") != self._owner_id:
             self._held = False
             return
         data["last_heartbeat"] = datetime.now().isoformat(timespec="seconds")

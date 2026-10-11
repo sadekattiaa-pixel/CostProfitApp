@@ -3,10 +3,11 @@
 """
 import json
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from PySide6.QtCore import Qt, QSize, QDate, QObject, QEvent, QStringListModel, QTimer
-from PySide6.QtGui import QColor, QDoubleValidator, QPixmap
+from PySide6.QtGui import QColor, QDoubleValidator, QPixmap, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QWidget, QTextEdit, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QPushButton, QLineEdit, QComboBox, QDateEdit, QTableWidget,
@@ -213,7 +214,7 @@ class NumericLineEdit(QLineEdit):
     def __init__(self, parent=None, integer_only=False):
         super().__init__(parent)
         self._integer_only = integer_only
-        validator = QDoubleValidator(0, 999_999_999, 2, self)
+        validator = QDoubleValidator(0, 999_999_999, 324, self)
         validator.setNotation(QDoubleValidator.Notation.StandardNotation)
         if integer_only:
             validator.setDecimals(0)
@@ -233,7 +234,8 @@ class NumericLineEdit(QLineEdit):
             if self._integer_only:
                 self.setText(str(int(val)))
             else:
-                self.setText(_fmt_num(val))
+                text = format(Decimal(str(val)), "f")
+                self.setText(text.rstrip("0").rstrip(".") if "." in text else text)
 
 
 # ============================================================
@@ -268,10 +270,6 @@ class SearchableComboBox(QComboBox):
             return None
         for i in range(self.count()):
             if self.itemText(i) == text:
-                return self.itemData(i)
-        for i in range(self.count()):
-            item_text = self.itemText(i)
-            if item_text and item_text.startswith(text):
                 return self.itemData(i)
         return None
 
@@ -408,7 +406,7 @@ class AmountRow(QFrame):
 
         self.amount_input = NumericLineEdit(self)
         if amount:
-            self.amount_input.setText(_fmt_num(amount))
+            self.amount_input.set_value(amount)
         self.amount_input.textChanged.connect(self.parent_dialog._recalculate)
         layout.addWidget(self.amount_input, 1)
 
@@ -1096,11 +1094,34 @@ class InvoicePage(QWidget):
 
         product_combo = SearchableComboBox()
         product_combo.setPlaceholderText(_t("select_product", self.language))
-        product_combo.addItem("", None)
-        if self.current_supplier_id:
-            prods = product_service.get_all(supplier_id=self.current_supplier_id, sort="name_asc")
+        from app.db import db
+        signature = (id(db._conn), db._conn.total_changes, self.current_supplier_id)
+        cache = getattr(self, "_catalog_cache", None)
+        if cache is None or cache[0] != signature:
+            prods = product_service.get_all(supplier_id=self.current_supplier_id, sort="name_asc") if self.current_supplier_id else []
+            model = QStandardItemModel(self)
+            model.appendRow(QStandardItem(""))
             for p in prods:
-                product_combo.addItem(p["name"] + (" — " + p["pattern"] if p.get("pattern") else ""), p["id"])
+                item = QStandardItem(p["name"] + (" — " + p["pattern"] if p.get("pattern") else ""))
+                item.setData(p["id"], Qt.ItemDataRole.UserRole)
+                model.appendRow(item)
+            if cache is not None:
+                # Retain a shared model while any existing row still uses it.
+                old_model = cache[1]
+                users = [r["product_combo"] for r in self._item_rows if r["product_combo"].model() is old_model]
+                if users:
+                    self._retired_catalogs = getattr(self, "_retired_catalogs", []) + [old_model]
+                else:
+                    old_model.deleteLater()
+            self._catalog_cache = (signature, model)
+        else:
+            model = cache[1]
+        if product_snapshot or (product_id and not any(model.item(i).data(Qt.ItemDataRole.UserRole) == product_id for i in range(model.rowCount()))):
+            private = QStandardItemModel(product_combo)
+            for i in range(model.rowCount()):
+                private.appendRow(model.item(i).clone())
+            model = private
+        product_combo.setModel(model)
 
         # Historical/imported invoices may contain a product whose supplier no
         # longer matches the invoice supplier. Keep it visible instead of
@@ -1119,16 +1140,15 @@ class InvoicePage(QWidget):
                     product_combo.setItemText(index, product_snapshot.get("product_name", "") + (" — " + product_snapshot["product_pattern"] if product_snapshot.get("product_pattern") else ""))
                     break
 
-        strings = [product_combo.itemText(i) for i in range(product_combo.count())
-                   if product_combo.itemText(i)]
-        product_combo.completer().setModel(QStringListModel(strings, self))
+        product_combo.completer().setModel(product_combo.model())
+        product_combo.completer().setCompletionRole(Qt.ItemDataRole.DisplayRole)
 
         product_combo.currentIndexChanged.connect(lambda _, r=row_data: self._on_product_selected(r))
         self.items_table.setCellWidget(row_idx, self._col_index["product"], product_combo)
         row_data["product_combo"] = product_combo
         row_data["product_info"] = None
 
-        qty_input = NumericLineEdit(self, integer_only=True)
+        qty_input = NumericLineEdit(self)
         qty_input.textChanged.connect(self._recalculate)
         row_data["qty"] = qty_input
 
@@ -1279,9 +1299,19 @@ class InvoicePage(QWidget):
         self._remove_items_table_row(row_index)
         if 0 <= row_index < len(self._item_rows):
             self._item_rows.pop(row_index)
+        self._release_unused_catalogs()
         for i, row in enumerate(self._item_rows):
             row["remove_widget"].row_index = i
         self._recalculate()
+
+    def _release_unused_catalogs(self):
+        retained = []
+        for model in getattr(self, "_retired_catalogs", []):
+            if any(row["product_combo"].model() is model for row in self._item_rows):
+                retained.append(model)
+            else:
+                model.deleteLater()
+        self._retired_catalogs = retained
 
     def _duplicate_item_row(self, row_index):
         if not 0 <= row_index < len(self._item_rows):
@@ -1294,6 +1324,7 @@ class InvoicePage(QWidget):
             sale=source["sale"].value(),
             pallet=self._pallet_value(source),
             insert_at=row_index + 1,
+            product_snapshot=dict(source["product_snapshot"]) if source.get("product_snapshot") else None,
         )
 
     def _remove_items_table_row(self, row_index):
@@ -1310,6 +1341,7 @@ class InvoicePage(QWidget):
         while self.items_table.rowCount() > 0:
             self._remove_items_table_row(0)
         self._item_rows.clear()
+        self._release_unused_catalogs()
         self._ensure_total_row()
 
     def _ensure_total_row(self):
@@ -1534,7 +1566,7 @@ class InvoicePage(QWidget):
             QMessageBox.warning(self, _t("err_title", self.language), error)
             return
         from app.ui.pages.archive import ExportContentDialog
-        from app.services.export_service import export_service, DEFAULT_INVOICE_SECTIONS, DEFAULT_INVOICE_ITEM_COLUMNS, DEFAULT_SUPPLIER_FIELDS
+        from app.services.export_service import safe_filename, export_service, DEFAULT_INVOICE_SECTIONS, DEFAULT_INVOICE_ITEM_COLUMNS, DEFAULT_SUPPLIER_FIELDS
         from app.ui.pdf_preview import show_pdf_preview, BACK_TO_OPTIONS
         try:
             dialog = ExportContentDialog(
@@ -1566,7 +1598,7 @@ class InvoicePage(QWidget):
             invoice["items"] = enriched_items
             while dialog.exec() == QDialog.DialogCode.Accepted:
                 with TemporaryDirectory(prefix="costprofit-preview-") as directory:
-                    filename = f'{invoice["invoice_no"]}.pdf'
+                    filename = f'{safe_filename(invoice["invoice_no"])}.pdf'
                     path = Path(directory) / filename
                     export_service.export_invoice_pdf(
                         invoice, str(path), sections=dialog.get_sections(),
@@ -1578,19 +1610,54 @@ class InvoicePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, _t("err_title", self.language), str(exc))
 
+    def _form_state(self):
+        # Keep raw input, including incomplete/invalid text, until it is saved or discarded.
+        return (
+            self.current_supplier_id,
+            self.sup_inv_input.text(), self.date_input.date().toString("yyyy-MM-dd"),
+            tuple((row["product_combo"].current_product_id(),
+                   row["product_combo"].currentText() if row["product_combo"].current_product_id() is None else "",
+                   *(row[key].text() for key in ("qty", "purchase", "sale", "pallet_input")))
+                  for row in self._item_rows),
+            tuple(tuple((row.label_input.text(), row.amount_input.text()) for row in rows)
+                  for rows in (self._amount_rows_payments, self._amount_rows_discounts, self._amount_rows_expenses)),
+        )
+
+    def has_unsaved_changes(self):
+        return self._form_state() != getattr(self, "_saved_form_state", self._form_state())
+
+    def confirm_pending_changes(self):
+        if not self.has_unsaved_changes():
+            return True
+        reply = QMessageBox.question(
+            self, "تغييرات غير محفوظة" if self.language == "ar" else "Unsaved changes",
+            "هل تريد حفظ تعديلات الفاتورة؟" if self.language == "ar" else "Save the invoice changes?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            return self._save_draft(show_message=False)
+        return reply == QMessageBox.StandardButton.Discard
+
     def _on_save_draft(self):
+        self._save_draft()
+
+    def _save_draft(self, show_message=True):
         valid, err = self._validate()
         if not valid:
             QMessageBox.warning(self, _t("err_title", self.language), err)
-            return
-        data = self._collect_all()
+            return False
         try:
+            data = self._collect_all()
             self.invoice_id = invoice_service.save_draft(self.invoice_id, **data)
-            QMessageBox.information(self, _t("saved_msg", self.language),
-                                    _t("saved_msg", self.language))
+            self._saved_form_state = self._form_state()
+            if show_message:
+                QMessageBox.information(self, _t("saved_msg", self.language), _t("saved_msg", self.language))
             self._reload_texts()
-        except InvoiceError as e:
+            return True
+        except Exception as e:
             QMessageBox.warning(self, _t("err_title", self.language), str(e))
+            return False
 
     def _on_archive(self):
         valid, err = self._validate()
@@ -1607,7 +1674,8 @@ class InvoicePage(QWidget):
             invoice_service.archive(self.invoice_id, **data)
             QMessageBox.information(self, _t("archived_msg", self.language),
                                     _t("archived_msg", self.language))
-            self._on_reset()
+            self.invoice_id = None
+            self._reset_form()
         except InvoiceError as e:
             QMessageBox.warning(self, _t("err_title", self.language), str(e))
 
@@ -1649,6 +1717,7 @@ class InvoicePage(QWidget):
 
         self.tabs.setCurrentIndex(0)
         self._recalculate()
+        self._saved_form_state = self._form_state()
 
     def _load_invoice(self, invoice_id):
         inv = invoice_service.get_by_id(invoice_id)
@@ -1709,10 +1778,13 @@ class InvoicePage(QWidget):
             self.expenses_container.addWidget(row)
 
         self._recalculate()
+        self._saved_form_state = self._form_state()
 
     # ✅ دالة جديدة: يفتح فاتورة موجودة للتعديل من الخارج
     def load_invoice(self, invoice_id: int):
         """يفتح فاتورة موجودة للتعديل (يُستدعى من الخارج)."""
+        if not self.confirm_pending_changes():
+            return False
         self.invoice_id = invoice_id
         self._reload_texts()
         self._load_invoice(invoice_id)

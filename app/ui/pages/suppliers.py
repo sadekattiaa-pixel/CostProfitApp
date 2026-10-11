@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.supplier_service import supplier_service, SupplierError
+from app.ui import PageControls
 from app.ui.theme import get_palette
 from app.ui.icons import make_icon
 from app.ui.theme import set_widget_stylesheet
@@ -530,6 +531,8 @@ class SuppliersPage(QWidget):
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.verticalHeader().setDefaultSectionSize(56)
         self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        self.pager = PageControls(self.refresh, self)
+        layout.addWidget(self.pager)
         layout.addWidget(self.table, 1)
 
         # ===== Empty State =====
@@ -619,9 +622,12 @@ class SuppliersPage(QWidget):
         search = self.search_input.text().strip()
         sort = self.sort_combo.currentData() or "newest"
 
-        rows = supplier_service.get_all(search=search, sort=sort)
+        filters = dict(search=search, sort=sort)
+        total = supplier_service.get_all(**filters, count_only=True)
+        self.pager.configure(filters, total, self.language)
+        rows = supplier_service.get_all(**filters, limit=self.pager.size, offset=self.pager.offset)
         self.table.setRowCount(len(rows))
-        self.counter.setText(_t("count", self.language, n=len(rows)))
+        self.counter.setText(_t("count", self.language, n=total))
 
         if not rows:
             self.table.setVisible(False)
@@ -642,7 +648,7 @@ class SuppliersPage(QWidget):
 
     def _fill_row(self, row_idx: int, s: dict):
         # #
-        item = QTableWidgetItem(str(row_idx + 1))
+        item = QTableWidgetItem(str(self.pager.offset + row_idx + 1))
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row_idx, 0, item)
 

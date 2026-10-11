@@ -4,6 +4,7 @@
 from datetime import date, timedelta
 
 from app.db import db
+from app.services.reports_service import HISTORICAL_ITEMS_SQL
 
 
 # ============================================================
@@ -88,16 +89,13 @@ class DashboardService:
         """توزيع الأرباح حسب التصنيف."""
         f, t = _period_range(period)
         rows = db.query_all(
-            """
-            SELECT
-                p.category AS category,
-                COALESCE(SUM(ii.total_profit), 0) AS profit
-            FROM invoice_items ii
-            JOIN products p ON p.id = ii.product_id
-            JOIN invoices i ON i.id = ii.invoice_id
-            WHERE i.status = 'archived'
-              AND i.invoice_date BETWEEN ? AND ?
-            GROUP BY p.category
+            HISTORICAL_ITEMS_SQL + """
+            SELECT ii.category AS category,
+                   COALESCE(SUM(ii.total_profit), 0) AS profit
+            FROM historical_items ii
+            WHERE ii.status = 'archived'
+              AND ii.invoice_date BETWEEN ? AND ?
+            GROUP BY ii.category
             """,
             (f, t),
         )

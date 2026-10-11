@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QToolButton, QStatusBar, QMessageBox,
 )
 
-from app.config import APP_NAME, APP_VERSION
+from app.config import APP_NAME, APP_VERSION, APP_AUTHOR
 from app.services.settings_service import settings
 from app.services.backup_service import backup_service
 from app.ui.theme import get_palette
@@ -44,7 +44,7 @@ NAV_ITEMS = [
 # ============================================================
 # بيانات المطور
 # ============================================================
-DEVELOPER_NAME_EN = "Alintilqa Programming"
+DEVELOPER_NAME_EN = APP_AUTHOR
 DEVELOPER_NAME_AR = "شركة الانطلاقة للبرمجة"
 DEVELOPER_PERSON_EN = "Al-Siddiq Ben Attia"
 DEVELOPER_PERSON_AR = "الصديق بن عطية"
@@ -134,24 +134,11 @@ class MainWindow(QMainWindow):
             if key == "dashboard":
                 page = DashboardPage(theme=self.theme, language=self.language)
                 self.dashboard_page = page
-            elif key == "suppliers":
-                page = SuppliersPage(theme=self.theme, language=self.language)
-                self.suppliers_page = page
-            elif key == "products":
-                page = ProductsPage(theme=self.theme, language=self.language)
-                self.products_page = page
+            elif key in ("suppliers", "products", "archive", "reports", "settings"):
+                page = QWidget()
             elif key == "invoice":
                 page = InvoicePage(theme=self.theme, language=self.language)
                 self.invoice_page = page
-            elif key == "archive":
-                page = ArchivePage(theme=self.theme, language=self.language)
-                self.archive_page = page
-            elif key == "reports":
-                page = ReportsPage(theme=self.theme, language=self.language)
-                self.reports_page = page
-            elif key == "settings":
-                page = SettingsPage(theme=self.theme, language=self.language)
-                self.settings_page = page
             else:
                 page = self._build_placeholder_page(key, en, ar)
             self.content_stack.addWidget(page)
@@ -165,13 +152,15 @@ class MainWindow(QMainWindow):
         if self.settings_page:
             self.settings_page.language_changed.connect(self._on_settings_language_changed)
             self.settings_page.theme_changed.connect(self._on_settings_theme_changed)
+            self.settings_page.backup_interval_changed.connect(self._on_backup_interval_changed)
+            self.settings_page._pending_changes_guard = self.invoice_page.confirm_pending_changes
 
         # ✅ ربط إشارة التنقل من Dashboard
         if self.dashboard_page:
             self.dashboard_page.navigate_to.connect(self._switch_page)
             self.dashboard_page.open_draft_requested.connect(self._on_edit_draft_requested)
             self.dashboard_page.open_invoice_requested.connect(
-                lambda invoice_id: self.archive_page._on_view({"id": invoice_id})
+                lambda invoice_id: self._ensure_page("archive")._on_view({"id": invoice_id})
             )
 
         # إشارة تعديل المسودة
@@ -180,6 +169,30 @@ class MainWindow(QMainWindow):
 
         self._apply_layout_direction()
         self._build_statusbar()
+
+    def _ensure_page(self, key):
+        existing = getattr(self, key + "_page", None)
+        if existing is not None:
+            return existing
+        classes = {"suppliers": SuppliersPage, "products": ProductsPage,
+                   "archive": ArchivePage, "reports": ReportsPage, "settings": SettingsPage}
+        if key not in classes:
+            return None
+        page = classes[key](theme=self.theme, language=self.language)
+        setattr(self, key + "_page", page)
+        index = [item[0] for item in NAV_ITEMS].index(key)
+        placeholder = self.content_stack.widget(index)
+        self.content_stack.removeWidget(placeholder)
+        self.content_stack.insertWidget(index, page)
+        placeholder.deleteLater()
+        if key == "archive":
+            page.edit_draft_requested.connect(self._on_edit_draft_requested)
+        elif key == "settings":
+            page.language_changed.connect(self._on_settings_language_changed)
+            page.theme_changed.connect(self._on_settings_theme_changed)
+            page.backup_interval_changed.connect(self._on_backup_interval_changed)
+            page._pending_changes_guard = self.invoice_page.confirm_pending_changes
+        return page
 
     def _on_edit_draft_requested(self, invoice_id: int):
         if self.invoice_page:
@@ -230,6 +243,10 @@ class MainWindow(QMainWindow):
         self._auto_backup_timer.timeout.connect(self._create_auto_backup)
         minutes = max(1, settings.get_int("auto_backup_minutes", 30))
         self._auto_backup_timer.start(minutes * 60_000)
+
+    def _on_backup_interval_changed(self, minutes):
+        if hasattr(self, "_auto_backup_timer"):
+            self._auto_backup_timer.setInterval(max(1, minutes) * 60_000)
 
     def _create_auto_backup(self):
         try:
@@ -557,6 +574,7 @@ class MainWindow(QMainWindow):
         if key not in keys:
             return
         index = keys.index(key)
+        self._ensure_page(key)
         self.content_stack.setCurrentIndex(index)
 
         for k, btn in self.nav_buttons.items():
@@ -578,9 +596,11 @@ class MainWindow(QMainWindow):
             self.suppliers_page.refresh()
         elif key == "products" and self.products_page:
             self.products_page.refresh()
-        elif key == "invoice" and self.invoice_page and self.invoice_page.invoice_id is None:
-            from app.services.invoice_service import invoice_service
-            self.invoice_page.inv_no_input.setText(invoice_service.generate_invoice_number())
+        elif key == "invoice" and self.invoice_page:
+            self.invoice_page._reload_suppliers()
+            if self.invoice_page.invoice_id is None:
+                from app.services.invoice_service import invoice_service
+                self.invoice_page.inv_no_input.setText(invoice_service.generate_invoice_number())
         elif key == "archive" and self.archive_page:
             self.archive_page.refresh()
         elif key == "reports" and self.reports_page:
@@ -655,9 +675,11 @@ class MainWindow(QMainWindow):
         self._last_activity = time.monotonic()
         self.hide()
         login = LoginWindow()
+        login._close_guard = self.invoice_page.confirm_pending_changes
         login.setWindowModality(Qt.WindowModality.ApplicationModal)
 
         def on_login_success():
+            login._close_guard = None
             login.close()
             self._last_activity = time.monotonic()
             self.show()
@@ -666,6 +688,9 @@ class MainWindow(QMainWindow):
         login.show()
 
     def closeEvent(self, event):
+        if self.invoice_page and not self.invoice_page.confirm_pending_changes():
+            event.ignore()
+            return
         self._create_auto_backup()
         app = QApplication.instance()
         if app is not None:

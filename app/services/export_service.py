@@ -324,6 +324,27 @@ class _InvoiceNumberedCanvas(canvas.Canvas):
         super().save()
 
 
+def safe_filename(value: str) -> str:
+    import re
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(value)).strip().rstrip('. ')
+    if name.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL'} or name.split('.')[0].upper() in {f'{p}{n}' for p in ('COM','LPT') for n in range(1,10)}:
+        name = '_' + name
+    return name[:150] or 'Invoice'
+
+def _sheet_title(value) -> str:
+    import re
+    return re.sub(r'[\[\]:*?/\\\x00-\x1f]', '_', str(value))[:31].strip("'") or 'Report'
+
+def _save_literal_workbook(workbook, file_path):
+    # These exports contain values, never executable spreadsheet formulas.
+    for sheet in workbook:
+        for row in sheet:
+            for cell in row:
+                if cell.data_type == 'f':
+                    cell.data_type = 's'
+    workbook.save(file_path)
+
+
 class ExportService:
 
     @staticmethod
@@ -406,12 +427,12 @@ class ExportService:
                 cell.border = border
 
             image_path = self._get_product_image_path(product)
-            if image_path:
+            if image_path and 10 in selected:
                 picture = ExcelImage(str(image_path))
                 scale = min(48 / picture.width, 40 / picture.height)
                 picture.width *= scale
                 picture.height *= scale
-                picture.anchor = f"{get_column_letter(len(headers))}{row_index}"
+                picture.anchor = f"{get_column_letter(selected.index(10) + 1 + int(has_tires))}{row_index}"
                 ws.add_image(picture)
                 ws.row_dimensions[row_index].height = 32
 
@@ -422,7 +443,7 @@ class ExportService:
         for index, width in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(index)].width = width
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(products) + 1)}"
-        wb.save(file_path)
+        _save_literal_workbook(wb, file_path)
         return file_path
 
     # --------------------------------------------------------
@@ -432,7 +453,7 @@ class ExportService:
     def export_excel(self, report: ReportData, file_path: str) -> str:
         wb = Workbook()
         ws = wb.active
-        ws.title = report.title[:31] or "Report"
+        ws.title = _sheet_title(report.title)
         ws.sheet_view.rightToLeft = True
 
         header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
@@ -497,7 +518,7 @@ class ExportService:
             letter = get_column_letter(col_idx)
             ws.column_dimensions[letter].width = 20
 
-        wb.save(file_path)
+        _save_literal_workbook(wb, file_path)
         return file_path
 
     # --------------------------------------------------------
@@ -566,13 +587,13 @@ class ExportService:
 
         lines = []
         if company_name:
-            lines.append(f"<b>{_ar(company_name)}</b>")
+            lines.append(f"<b>{escape(_ar(company_name))}</b>")
         if company_phone:
-            lines.append(_ar(f"هاتف: {company_phone}"))
+            lines.append(escape(_ar(f"هاتف: {company_phone}")))
         if company_email:
-            lines.append(_ar(f"البريد: {company_email}"))
+            lines.append(escape(_ar(f"البريد: {company_email}")))
         if company_addr:
-            lines.append(_ar(f"العنوان: {company_addr}"))
+            lines.append(escape(_ar(f"العنوان: {company_addr}")))
 
         company_html = "<br/>".join(lines) if lines else " "
         company_para = Paragraph(company_html, company_style)
@@ -598,7 +619,7 @@ class ExportService:
         elements.append(sep)
         elements.append(Spacer(1, 12))
 
-        elements.append(Paragraph(_ar(report.title), title_style))
+        elements.append(Paragraph(escape(_ar(report.title)), title_style))
         elements.append(Spacer(1, 4))
         date_str = f"تاريخ التقرير: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         elements.append(Paragraph(_ar(date_str), sub_style))
@@ -618,7 +639,7 @@ class ExportService:
 
             for row in rows_kpi:
                 tdata = [
-                    [Paragraph(_ar(lbl), kpi_lbl_style) for lbl, _ in row],
+                    [Paragraph(escape(_ar(lbl)), kpi_lbl_style) for lbl, _ in row],
                     [Paragraph(escape(_ar(_pdf_text(val, "$" in str(val) or "USD" in str(val)))), kpi_val_style) for _, val in row],
                 ]
                 t = Table(tdata, colWidths=[50 * mm] * 4)
@@ -1072,7 +1093,7 @@ class ExportService:
 
         wb = Workbook()
         ws = wb.active
-        ws.title = invoice.get("invoice_no", "Invoice")[:31]
+        ws.title = _sheet_title(invoice.get("invoice_no") or "Invoice")
         ws.sheet_view.rightToLeft = is_ar
 
         primary_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
@@ -1335,7 +1356,7 @@ class ExportService:
             letter = get_column_letter(col_idx)
             ws.column_dimensions[letter].width = 18
 
-        wb.save(file_path)
+        _save_literal_workbook(wb, file_path)
         return file_path
 
     # --------------------------------------------------------

@@ -2,8 +2,10 @@
 
 APP_NAME = "Invoice"
 APP_NAME_AR = "Invoice"
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.1.0"
 APP_AUTHOR = "Alintilqa Programming & Digital Solutions"
+APP_COPYRIGHT = "© 2026 Alintilqa Programming & Digital Solutions. All rights reserved."
+APP_COPYRIGHT_AR = "© 2026 Alintilqa Programming & Digital Solutions. جميع الحقوق محفوظة."
 
 # Limits
 MAX_PRODUCTS_WARNING = 500

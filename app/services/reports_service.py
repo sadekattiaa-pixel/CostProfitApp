@@ -5,6 +5,34 @@ from datetime import date, timedelta
 
 from app.db import db
 
+# Archived catalog fields remain stable even when the current product is edited.
+HISTORICAL_ITEMS_SQL = """
+WITH frozen_items AS MATERIALIZED (
+    SELECT i.id AS invoice_id, frozen.value,
+           CAST(json_extract(frozen.value, '$.line_no') AS INTEGER) AS line_no,
+           CAST(json_extract(frozen.value, '$.product_id') AS INTEGER) AS product_id
+    FROM invoices i
+    JOIN json_each(CASE WHEN json_valid(i.archived_snapshot) THEN i.archived_snapshot ELSE NULL END, '$.items') frozen
+), historical_items AS (
+    SELECT ii.*, i.invoice_date, i.status,
+           COALESCE(json_extract(frozen.value, '$.product_name'),
+                    CASE WHEN p.category = 'Batteries' THEN p.code ELSE p.name END) AS name,
+           COALESCE(json_extract(frozen.value, '$.product_code'), p.code) AS code,
+           COALESCE(json_extract(frozen.value, '$.product_category'), p.category) AS category,
+           CASE WHEN frozen.value IS NOT NULL THEN COALESCE(json_extract(frozen.value, '$.product_pattern'), '')
+                ELSE COALESCE(p.pattern, '') END AS pattern
+    FROM invoice_items ii
+    JOIN invoices i ON i.id = ii.invoice_id
+    JOIN products p ON p.id = ii.product_id
+    LEFT JOIN frozen_items frozen
+      ON frozen.invoice_id = ii.invoice_id
+     AND frozen.line_no = ii.line_no
+     AND frozen.product_id = ii.product_id
+     AND json_extract(frozen.value, '$.line_no') = ii.line_no
+     AND json_extract(frozen.value, '$.product_id') = ii.product_id
+)
+"""
+
 
 def _period_range(period: str) -> tuple[str, str]:
     today = date.today()
@@ -270,10 +298,10 @@ class ReportsService:
                                category: str = "", top_n: int = 10) -> dict:
         f, t = _period_range(period)
 
-        conditions = ["i.status = 'archived'", "i.invoice_date BETWEEN ? AND ?"]
+        conditions = ["ii.status = 'archived'", "ii.invoice_date BETWEEN ? AND ?"]
         params = [f, t]
         if category:
-            conditions.append("p.category = ?")
+            conditions.append("ii.category = ?")
             params.append(category)
         where = " AND ".join(conditions)
 
@@ -285,16 +313,15 @@ class ReportsService:
             query_params.append(top_n)
 
         rows = db.query_all(
-            f"""
-            SELECT p.id, CASE WHEN p.category = 'Batteries' THEN p.code ELSE p.name END AS code, CASE WHEN p.category = 'Batteries' THEN p.code ELSE p.name END AS name, p.category, p.pattern,
+            HISTORICAL_ITEMS_SQL + f"""
+            SELECT ii.product_id AS id, CASE WHEN ii.category = 'Batteries' THEN ii.code ELSE ii.name END AS code,
+                   ii.name, ii.category, ii.pattern,
                    COALESCE(SUM(ii.quantity), 0) AS total_qty,
                    COALESCE(SUM(ii.total_sale), 0) AS total_sales,
                    COALESCE(SUM(ii.total_profit), 0) AS total_profit
-            FROM invoice_items ii
-            JOIN products p ON p.id = ii.product_id
-            JOIN invoices i ON i.id = ii.invoice_id
+            FROM historical_items ii
             WHERE {where}
-            GROUP BY p.id
+            GROUP BY ii.product_id, ii.name, ii.code, ii.category, ii.pattern
             ORDER BY total_profit DESC
             {limit_clause}
             """,
@@ -325,10 +352,10 @@ class ReportsService:
                             category: str = "", top_n: int = 10) -> dict:
         f, t = _period_range(period)
 
-        conditions = ["i.status = 'archived'", "i.invoice_date BETWEEN ? AND ?"]
+        conditions = ["ii.status = 'archived'", "ii.invoice_date BETWEEN ? AND ?"]
         params = [f, t]
         if category:
-            conditions.append("p.category = ?")
+            conditions.append("ii.category = ?")
             params.append(category)
         where = " AND ".join(conditions)
 
@@ -340,16 +367,15 @@ class ReportsService:
             query_params.append(top_n)
 
         rows = db.query_all(
-            f"""
-            SELECT p.id, CASE WHEN p.category = 'Batteries' THEN p.code ELSE p.name END AS code, CASE WHEN p.category = 'Batteries' THEN p.code ELSE p.name END AS name, p.category, p.pattern,
+            HISTORICAL_ITEMS_SQL + f"""
+            SELECT ii.product_id AS id, CASE WHEN ii.category = 'Batteries' THEN ii.code ELSE ii.name END AS code,
+                   ii.name, ii.category, ii.pattern,
                    COALESCE(SUM(ii.quantity), 0) AS total_qty,
                    COALESCE(SUM(ii.total_sale), 0) AS total_sales,
-                   COUNT(DISTINCT i.id) AS invoices_count
-            FROM invoice_items ii
-            JOIN products p ON p.id = ii.product_id
-            JOIN invoices i ON i.id = ii.invoice_id
+                   COUNT(DISTINCT ii.invoice_id) AS invoices_count
+            FROM historical_items ii
             WHERE {where}
-            GROUP BY p.id
+            GROUP BY ii.product_id, ii.name, ii.code, ii.category, ii.pattern
             ORDER BY total_qty DESC
             {limit_clause}
             """,

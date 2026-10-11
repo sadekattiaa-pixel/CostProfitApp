@@ -30,12 +30,14 @@ class InvoiceImportUiTests(unittest.TestCase):
                 path.unlink()
 
     def test_imported_supplier_and_product_are_selected_in_existing_page(self):
+        supplier_id = supplier_service.create("S-TEST", "مورد الاختبار")
+        product_service.create("TEST-ITEM-1", "صنف الاختبار", "Batteries", supplier_id)
         page = InvoicePage(language="ar")
         report = ImportReport(rows=[InvoiceRow(
             invoice_no="SUP-100",
             date="2026-09-27",
             supplier="مورد الاختبار",
-            product="صنف الاختبار",
+            product="TEST-ITEM-1",
             product_code="TEST-ITEM-1",
             qty=2,
             unit_price=10,

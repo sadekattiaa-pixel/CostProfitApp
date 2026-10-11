@@ -91,9 +91,10 @@ def calculate_invoice(
     if any(v < 0 for v in payment_values + discount_values + expense_values):
         raise CalculationError("Payments, discounts, and expenses cannot be negative.")
 
-    total_payments = sum(payment_values, Decimal("0"))
-    total_discounts = sum(discount_values, Decimal("0"))
-    total_expenses = sum(expense_values, Decimal("0"))
+    rounded = lambda value: value.quantize(MONEY, rounding=ROUND_HALF_UP)
+    total_payments = sum((rounded(v) for v in payment_values), Decimal("0"))
+    total_discounts = sum((rounded(v) for v in discount_values), Decimal("0"))
+    total_expenses = sum((rounded(v) for v in expense_values), Decimal("0"))
 
     if total_discounts > total_payments:
         raise CalculationError("Total discounts cannot exceed total payments.")
@@ -127,20 +128,28 @@ def calculate_invoice(
     total_sales = Decimal("0")
     total_profit = Decimal("0")
 
+    cumulative_cost = Decimal("0")
+    allocated_cost = Decimal("0")
+    rounded_usd = Decimal("0")
     for it, quantity, purchase_usd, sale_dzd in normalized_items:
         purchase_dzd = purchase_usd * exchange_rate
         item_total_usd = quantity * purchase_usd
-        item_total_dzd = quantity * purchase_dzd
-        item_total_sale = quantity * sale_dzd
+        # Allocate rounding cents cumulatively; line costs sum to net_cost.
+        cumulative_cost += quantity * purchase_dzd
+        next_allocation = rounded(cumulative_cost)
+        item_total_dzd = next_allocation - allocated_cost
+        allocated_cost = next_allocation
+        item_total_sale = rounded(quantity * sale_dzd)
         unit_profit = sale_dzd - purchase_dzd
-        item_total_profit = quantity * unit_profit
+        item_total_profit = item_total_sale - item_total_dzd
+        rounded_usd += rounded(item_total_usd)
 
         results.append(InvoiceItemResult(
             product_id=it.product_id,
             quantity=float(quantity),
-            purchase_usd=_money(purchase_usd),
+            purchase_usd=float(purchase_usd),
             purchase_dzd=_money(purchase_dzd),
-            sale_dzd=_money(sale_dzd),
+            sale_dzd=float(sale_dzd),
             total_usd=_money(item_total_usd),
             total_dzd=_money(item_total_dzd),
             total_sale=_money(item_total_sale),
@@ -159,7 +168,7 @@ def calculate_invoice(
         net_payments=_money(net_payments),
         total_expenses=_money(total_expenses),
         net_cost=_money(net_cost),
-        total_usd=_money(total_usd),
+        total_usd=_money(rounded_usd),
         exchange_rate=_rate(exchange_rate),
         total_sales=_money(total_sales),
         total_profit=_money(total_profit),

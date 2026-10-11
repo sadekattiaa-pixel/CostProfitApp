@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import (
-    APP_NAME, APP_VERSION, PASSWORD_MIN_LENGTH,
+    APP_NAME, APP_VERSION, APP_COPYRIGHT, PASSWORD_MIN_LENGTH,
     MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_SECONDS,
 )
 from app.services.auth_service import auth, AuthError
@@ -162,7 +162,8 @@ class LoginWindow(QWidget):
         main_layout.addStretch()
 
         # --- تذييل ---
-        footer = QLabel(f"v{APP_VERSION}  •  © 2026 Alintilqa")
+        footer = QLabel(f"v{APP_VERSION}\n{APP_COPYRIGHT}")
+        footer.setWordWrap(True)
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setObjectName("Footer")
         main_layout.addWidget(footer)
@@ -358,6 +359,13 @@ class LoginWindow(QWidget):
     # --------------------------------------------------------
     # الأنماط
     # --------------------------------------------------------
+    def closeEvent(self, event):
+        guard = getattr(self, "_close_guard", None)
+        if guard and not guard():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _apply_style(self):
         c = self.palette_data
         set_widget_stylesheet(self, f"""

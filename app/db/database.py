@@ -1,5 +1,6 @@
 """Database access layer."""
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
@@ -66,41 +67,60 @@ class Database:
 
     @contextmanager
     def cursor(self):
-        cur = self._conn.cursor()
-        try:
-            yield cur
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self.transaction():
+            cur = self._conn.cursor()
+            try:
+                yield cur
+            finally:
+                cur.close()
+
+    def after_commit(self, action):
+        frames = getattr(self, "_commit_actions", [])
+        if not frames:
+            raise RuntimeError("A managed transaction is required.")
+        frames[-1].append(action)
 
     @contextmanager
     def transaction(self, immediate: bool = False):
-        """Run a group of writes atomically, including safe nested calls."""
+        """Commit nested service operations only with their owning transaction."""
         if self._conn is None:
             raise RuntimeError("Database is not connected.")
-
-        if self._conn.in_transaction:
-            savepoint = f"sp_{id(object())}"
+        frames = getattr(self, "_commit_actions", None)
+        if frames is None:
+            frames = self._commit_actions = []
+        nested = self._conn.in_transaction
+        savepoint = "sp_" + uuid.uuid4().hex
+        if nested:
             self._conn.execute(f"SAVEPOINT {savepoint}")
-            try:
-                yield
-                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-            except Exception:
-                self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-                raise
-            return
-
-        self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        else:
+            self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        actions = []
+        frames.append(actions)
         try:
             yield
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
+            if nested:
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self._conn.commit()
+        except BaseException:
+            if nested:
+                self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self._conn.rollback()
             raise
+        finally:
+            frames.pop()
+        if nested and frames:
+            frames[-1].extend(actions)
+        elif not nested:
+            for action in actions:
+                coordinator = getattr(self, "_save_coordinator", None)
+                if coordinator is not None:
+                    coordinator.defer_cleanup(action)
+                else:
+                    action()
+        # An unmanaged outer transaction cannot safely schedule file deletion.
 
     def execute(self, sql: str, params: Iterable = ()):
         return self._conn.execute(sql, params)
@@ -137,6 +157,12 @@ class Database:
 
     @log_failures("reset the database")
     def reset(self, db_path: Path | None = None) -> None:
+        from contextlib import nullcontext
+        coordinator = getattr(self, "_save_coordinator", None)
+        with coordinator.suspend() if coordinator is not None else nullcontext():
+            self._reset(db_path)
+
+    def _reset(self, db_path: Path | None = None) -> None:
         path = db_path or get_db_path()
         path = Path(path)
         was_connected = self._conn is not None

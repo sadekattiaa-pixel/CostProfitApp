@@ -1,6 +1,6 @@
 #define MyAppName "Invoice"
 #define MyAppNameArabic "Invoice"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "2.1.0"
 #ifndef MyAppSource
   #define MyAppSource "..\dist\Invoice"
 #endif
@@ -32,6 +32,7 @@ RestartApplications=no
 UsePreviousAppDir=yes
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
+VersionInfoCopyright=Copyright (C) 2026 {#MyAppPublisher}. All rights reserved.
 VersionInfoDescription={#MyAppName} Installer
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
@@ -42,9 +43,6 @@ Name: "arabic"; MessagesFile: "compiler:Languages\Arabic.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-
-[Dirs]
-Name: "{app}\License"; Permissions: users-modify
 
 [Files]
 Source: "{#MyAppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

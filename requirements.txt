@@ -5,4 +5,3 @@ Pillow>=10.4,<13
 python-dateutil>=2.9,<3
 arabic-reshaper>=3.0,<4
 python-bidi>=0.6,<1
-cryptography>=43,<48

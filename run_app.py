@@ -15,7 +15,6 @@ from app.paths import get_shared_db_path, get_shared_images_dir
 from app.services.lock_service import lock, acquire_manual_session
 from app.services.settings_service import settings
 from app.services.error_logging import configure_error_logging, get_error_logger
-from app.services.license_service import LicenseError, verify_device_license
 from app.services.backup_service import backup_service
 from app.storage_config import (
     RESTART_EXIT_CODE, ensure_storage_is_writable, is_storage_configured,
@@ -34,18 +33,12 @@ def main():
     if sys.platform == "win32":
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Alintilqa.Invoice")
-    try:
-        verify_device_license()
-    except LicenseError as exc:
-        QMessageBox.critical(None, "تفعيل Invoice", str(exc))
-        return 2
-
     if not is_storage_configured():
         QMessageBox.information(
             None, "مجلد بيانات Invoice",
             "اختر مجلد البيانات والصور المشترك داخل OneDrive. "
             "على الأجهزة الأخرى اختر المجلد نفسه بعد اكتمال تنزيله. "
-            "سجل التفعيل والنسخ الاحتياطية سيبقيان محليًا.",
+            "النسخ الاحتياطية ستبقى محليًا.",
         )
         selected = QFileDialog.getExistingDirectory(None, "اختر مجلد البيانات والصور", str(Path.home()))
         if not selected:

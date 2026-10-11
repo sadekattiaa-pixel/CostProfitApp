@@ -1,2 +1,4 @@
 """Cost & Profit Calculator Package."""
-__version__ = "1.1.0"
+from app.config import APP_VERSION
+
+__version__ = APP_VERSION

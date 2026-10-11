@@ -131,7 +131,10 @@ class InvoiceService:
         date_from: str = "",
         date_to: str = "",
         sort: str = "newest",
-    ) -> list[dict]:
+        limit: int | None = None,
+        offset: int = 0,
+        count_only: bool = False,
+    ) -> list[dict] | int:
         order_map = {
             "newest":   "i.created_at DESC",
             "oldest":   "i.created_at ASC",
@@ -181,8 +184,16 @@ class InvoiceService:
             FROM invoices i
             JOIN suppliers s ON s.id = i.supplier_id
             {where}
-            ORDER BY {order_by}
+            ORDER BY {order_by}, i.id DESC
         """
+        if count_only:
+            filtered = sql.rsplit("ORDER BY", 1)[0]
+            return db.query_one(f"SELECT COUNT(*) AS n FROM ({filtered})", tuple(params))["n"]
+        if limit is not None:
+            if limit < 1 or offset < 0:
+                raise ValueError("Invalid page bounds")
+            sql += " LIMIT ? OFFSET ?"
+            params += [int(limit), int(offset)]
         return db.query_all(sql, tuple(params))
 
     def count_by_status(self, status: str) -> int:
@@ -422,8 +433,8 @@ class InvoiceService:
     # --------------------------------------------------------
     @log_failures("delete an invoice")
     def delete(self, invoice_id: int) -> None:
-        db.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
-        db._conn.commit()
+        with db.transaction(immediate=True):
+            db.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
 
     # --------------------------------------------------------
     # إحصائيات

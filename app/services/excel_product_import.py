@@ -153,6 +153,9 @@ class ExcelProductImporter:
                         continue
                     try:
                         number = float(str(value).replace(",", ""))
+                        import math
+                        if not math.isfinite(number) or number < 0:
+                            raise ValueError
                         if key in ("layout", "pallet"):
                             if number < 0 or not number.is_integer():
                                 raise ValueError
@@ -189,15 +192,18 @@ class ExcelProductImporter:
         from app.services.supplier_service import supplier_service
 
         suppliers = supplier_service.get_all()
-        supplier_map = {}
-        for supplier in suppliers:
-            supplier_map[supplier["name"].strip().casefold()] = supplier["id"]
-            supplier_map[supplier["code"].strip().casefold()] = supplier["id"]
-
         created = 0
         errors = list(report.errors)
         for row in report.rows:
-            supplier_id = supplier_map.get(row.supplier.casefold())
+            try:
+                supplier = supplier_service.resolve_reference(row.supplier, suppliers)
+            except ValueError as exc:
+                errors.append(f"السطر {row.row_number}: {exc}")
+                continue
+            except Exception as exc:
+                errors.append(f"السطر {row.row_number}: {exc}")
+                continue
+            supplier_id = supplier["id"] if supplier else None
             if supplier_id is None:
                 errors.append(
                     f"السطر {row.row_number}: المورد '{row.supplier}' غير موجود؛ "

@@ -18,6 +18,7 @@ from app.services.product_service import product_service, ProductError
 from app.services.export_service import export_service
 from app.services.supplier_service import supplier_service
 from app.services.settings_service import settings
+from app.ui import PageControls
 from app.ui.theme import get_palette
 from app.ui.icons import make_icon
 from app.ui.import_products_dialog import ImportProductsDialog
@@ -713,6 +714,8 @@ class ProductsPage(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(60)
         self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
         self.table.horizontalHeader().sectionResized.connect(self._on_column_resized)
+        self.pager = PageControls(self.refresh, self)
+        layout.addWidget(self.pager)
         layout.addWidget(self.table, 1)
 
         # Empty
@@ -810,10 +813,12 @@ class ProductsPage(QWidget):
         for key in ("ah", "l", "w", "h", "oh", "layout", "image"):
             self.table.setColumnHidden(PRODUCT_COL_KEYS.index(key), tires_only)
         self.table.setColumnHidden(PRODUCT_COL_KEYS.index("pattern"), category == "Batteries")
-        rows = product_service.get_all(search=search, category=category,
-                                       supplier_id=sup_id, sort=sort)
+        filters = dict(search=search, category=category, supplier_id=sup_id, sort=sort)
+        total = product_service.get_all(**filters, count_only=True)
+        self.pager.configure(filters, total, self.language)
+        rows = product_service.get_all(**filters, limit=self.pager.size, offset=self.pager.offset)
         self.table.setRowCount(len(rows))
-        self.counter.setText(_t("count", self.language, n=len(rows)))
+        self.counter.setText(_t("count", self.language, n=total))
 
         if not rows:
             self.table.setVisible(False)
@@ -834,7 +839,7 @@ class ProductsPage(QWidget):
 
     def _fill_row(self, row_idx, p):
         # #
-        item = QTableWidgetItem(str(row_idx + 1))
+        item = QTableWidgetItem(str(self.pager.offset + row_idx + 1))
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row_idx, PRODUCT_COL_KEYS.index("num"), item)
 

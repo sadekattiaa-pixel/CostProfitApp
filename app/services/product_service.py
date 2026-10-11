@@ -3,6 +3,7 @@
 """
 from pathlib import Path
 import unicodedata
+import math
 import hashlib
 import json
 import uuid
@@ -41,7 +42,10 @@ class ProductService:
         category: str = "",
         supplier_id: int | None = None,
         sort: str = "name_asc",
-    ) -> list[dict]:
+        limit: int | None = None,
+        offset: int = 0,
+        count_only: bool = False,
+    ) -> list[dict] | int:
         order_map = {
             "name_asc":   "p.name COLLATE NOCASE ASC",
             "name_desc":  "p.name COLLATE NOCASE DESC",
@@ -58,9 +62,9 @@ class ProductService:
         if search.strip():
             like = f"%{search.strip()}%"
             conditions.append(
-                "(p.name LIKE ? OR p.pattern LIKE ? OR s.name LIKE ?)"
+                "(p.name LIKE ? OR p.code LIKE ? OR p.pattern LIKE ? OR s.name LIKE ?)"
             )
-            params += [like, like, like]
+            params += [like, like, like, like]
 
         if category:
             conditions.append("p.category = ?")
@@ -83,8 +87,16 @@ class ProductService:
             FROM products p
             JOIN suppliers s ON s.id = p.supplier_id
             {where}
-            ORDER BY {order_by}
+            ORDER BY {order_by}, p.id ASC
         """
+        if count_only:
+            filtered = sql.rsplit("ORDER BY", 1)[0]
+            return db.query_one(f"SELECT COUNT(*) AS n FROM ({filtered})", tuple(params))["n"]
+        if limit is not None:
+            if limit < 1 or offset < 0:
+                raise ValueError("Invalid page bounds")
+            sql += " LIMIT ? OFFSET ?"
+            params += [int(limit), int(offset)]
         return db.query_all(sql, tuple(params))
 
     def get_by_id(self, product_id: int) -> dict | None:
@@ -132,41 +144,49 @@ class ProductService:
         oh: float | None = None, layout: int | None = None,
         pallet: int | None = None, layout_image: str | None = None, pattern: str = "",
     ) -> int:
-        code = (code or "").strip()
-        name = code if category == "Batteries" else (name or code).strip()
-        pattern = (pattern or "").strip()
-        if category not in CATEGORIES:
-            raise ProductError(f"Invalid category: {category}")
-        if category == "Batteries":
-            if not code:
-                raise ProductError("كود الصنف مطلوب.")
-            pattern = ""
-            self._ensure_unique_name(name)
-        else:
-            if not name:
-                raise ProductError("اسم الإطار مطلوب.")
-            if not pattern:
-                raise ProductError("نقشة الإطار مطلوبة.")
-            identity = json.dumps([category, self._normalize_name(name), self._normalize_name(pattern), supplier_id])
-            code = "TIRE-" + hashlib.sha256(identity.encode()).hexdigest()
-            ah = l = w = h = oh = layout = pallet = layout_image = None
-        exists = db.query_one("SELECT id FROM products WHERE code = ?", (code,))
-        if exists:
-            raise ProductError("الصنف موجود مسبقًا: تحقق من الاسم والنقشة والمورد." if category != "Batteries" else f"Product code '{code}' already exists.")
-        if not db.query_one("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)):
-            raise ProductError("Selected supplier does not exist.")
-        db.execute(
-            """
-            INSERT INTO products (
-                code, name, category, supplier_id, pattern,
-                ah, l, w, h, oh, layout, pallet, layout_image
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (code, name, category, supplier_id, pattern,
-             ah, l, w, h, oh, layout, pallet, layout_image),
-        )
-        db._conn.commit()
-        return db.query_one("SELECT last_insert_rowid() AS id")["id"]
+        with db.transaction(immediate=True):
+            code = (code or "").strip()
+            name = code if category == "Batteries" else (name or code).strip()
+            pattern = (pattern or "").strip()
+            if category not in CATEGORIES:
+                raise ProductError(f"Invalid category: {category}")
+            if category == "Batteries":
+                if not code:
+                    raise ProductError("كود الصنف مطلوب.")
+                pattern = ""
+                self._ensure_unique_name(name)
+            else:
+                if not name:
+                    raise ProductError("اسم الإطار مطلوب.")
+                if not pattern:
+                    raise ProductError("نقشة الإطار مطلوبة.")
+                identity = json.dumps([category, self._normalize_name(name), self._normalize_name(pattern), supplier_id])
+                code = "TIRE-" + hashlib.sha256(identity.encode()).hexdigest()
+                ah = l = w = h = oh = layout = pallet = layout_image = None
+            for field, value in (("ah", ah), ("l", l), ("w", w), ("h", h), ("oh", oh), ("layout", layout), ("pallet", pallet)):
+                if value is not None:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        raise ProductError(f"Invalid {field} value.")
+                    if not math.isfinite(number) or number < 0 or (field in ("layout", "pallet") and not number.is_integer()):
+                        raise ProductError(f"Invalid {field} value: use a finite nonnegative number.")
+            exists = db.query_one("SELECT id FROM products WHERE code = ?", (code,))
+            if exists:
+                raise ProductError("الصنف موجود مسبقًا: تحقق من الاسم والنقشة والمورد." if category != "Batteries" else f"Product code '{code}' already exists.")
+            if not db.query_one("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)):
+                raise ProductError("Selected supplier does not exist.")
+            db.execute(
+                """
+                INSERT INTO products (
+                    code, name, category, supplier_id, pattern,
+                    ah, l, w, h, oh, layout, pallet, layout_image
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (code, name, category, supplier_id, pattern,
+                 ah, l, w, h, oh, layout, pallet, layout_image),
+            )
+            return db.query_one("SELECT last_insert_rowid() AS id")["id"]
 
     def update(
         self,
@@ -177,56 +197,64 @@ class ProductService:
         oh: float | None = None, layout: int | None = None,
         pallet: int | None = None, layout_image: str | None = None, pattern: str = "",
     ) -> None:
-        code = (code or "").strip()
-        name = code if category == "Batteries" else (name or code).strip()
-        pattern = (pattern or "").strip()
-        if category not in CATEGORIES:
-            raise ProductError(f"Invalid category: {category}")
-        if category == "Batteries":
-            if not code:
-                raise ProductError("كود الصنف مطلوب.")
-            pattern = ""
-            self._ensure_unique_name(name, exclude_id=product_id)
-        else:
-            if not name:
-                raise ProductError("اسم الإطار مطلوب.")
-            if not pattern:
-                raise ProductError("نقشة الإطار مطلوبة.")
-            identity = json.dumps([category, self._normalize_name(name), self._normalize_name(pattern), supplier_id])
-            code = "TIRE-" + hashlib.sha256(identity.encode()).hexdigest()
-            ah = l = w = h = oh = layout = pallet = layout_image = None
-        exists = db.query_one("SELECT id FROM products WHERE code = ? AND id != ?", (code, product_id))
-        if exists:
-            raise ProductError("الصنف موجود مسبقًا: تحقق من الاسم والنقشة والمورد." if category != "Batteries" else f"Product code '{code}' already exists.")
-        if not db.query_one("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)):
-            raise ProductError("Selected supplier does not exist.")
-        db.execute(
-            """
-            UPDATE products
-               SET code = ?, name = ?, category = ?, supplier_id = ?, pattern = ?,
-                   ah = ?, l = ?, w = ?, h = ?, oh = ?,
-                   layout = ?, pallet = ?, layout_image = ?,
-                   updated_at = datetime('now')
-             WHERE id = ?
-            """,
-            (code, name, category, supplier_id, pattern,
-             ah, l, w, h, oh, layout, pallet, layout_image, product_id),
-        )
-        db._conn.commit()
+        with db.transaction(immediate=True):
+            code = (code or "").strip()
+            name = code if category == "Batteries" else (name or code).strip()
+            pattern = (pattern or "").strip()
+            if category not in CATEGORIES:
+                raise ProductError(f"Invalid category: {category}")
+            if category == "Batteries":
+                if not code:
+                    raise ProductError("كود الصنف مطلوب.")
+                pattern = ""
+                self._ensure_unique_name(name, exclude_id=product_id)
+            else:
+                if not name:
+                    raise ProductError("اسم الإطار مطلوب.")
+                if not pattern:
+                    raise ProductError("نقشة الإطار مطلوبة.")
+                identity = json.dumps([category, self._normalize_name(name), self._normalize_name(pattern), supplier_id])
+                code = "TIRE-" + hashlib.sha256(identity.encode()).hexdigest()
+                ah = l = w = h = oh = layout = pallet = layout_image = None
+            for field, value in (("ah", ah), ("l", l), ("w", w), ("h", h), ("oh", oh), ("layout", layout), ("pallet", pallet)):
+                if value is not None:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        raise ProductError(f"Invalid {field} value.")
+                    if not math.isfinite(number) or number < 0 or (field in ("layout", "pallet") and not number.is_integer()):
+                        raise ProductError(f"Invalid {field} value: use a finite nonnegative number.")
+            exists = db.query_one("SELECT id FROM products WHERE code = ? AND id != ?", (code, product_id))
+            if exists:
+                raise ProductError("الصنف موجود مسبقًا: تحقق من الاسم والنقشة والمورد." if category != "Batteries" else f"Product code '{code}' already exists.")
+            if not db.query_one("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)):
+                raise ProductError("Selected supplier does not exist.")
+            db.execute(
+                """
+                UPDATE products
+                   SET code = ?, name = ?, category = ?, supplier_id = ?, pattern = ?,
+                       ah = ?, l = ?, w = ?, h = ?, oh = ?,
+                       layout = ?, pallet = ?, layout_image = ?,
+                       updated_at = datetime('now')
+                 WHERE id = ?
+                """,
+                (code, name, category, supplier_id, pattern,
+                 ah, l, w, h, oh, layout, pallet, layout_image, product_id),
+            )
 
     def delete(self, product_id: int) -> None:
         # منع الحذف إذا كان مستخدمًا في فواتير
-        count = db.query_one(
-            "SELECT COUNT(*) AS c FROM invoice_items WHERE product_id = ?",
-            (product_id,),
-        )["c"]
-        if count > 0:
-            raise ProductError(
-                f"Cannot delete: product is used in {count} invoice item(s)."
-            )
+        with db.transaction(immediate=True):
+            count = db.query_one(
+                "SELECT COUNT(*) AS c FROM invoice_items WHERE product_id = ?",
+                (product_id,),
+            )["c"]
+            if count > 0:
+                raise ProductError(
+                    f"Cannot delete: product is used in {count} invoice item(s)."
+                )
 
-        db.execute("DELETE FROM products WHERE id = ?", (product_id,))
-        db._conn.commit()
+            db.execute("DELETE FROM products WHERE id = ?", (product_id,))
 
     # --------------------------------------------------------
     # صور المنتجات
@@ -299,9 +327,9 @@ class ProductService:
             if not db.query_one("SELECT filename FROM layout_images WHERE filename=?", (filename,)):
                 raise ProductError("Image not found.")
             path = self.get_image_path(filename)
-            if path:
-                path.unlink()
             db.execute("DELETE FROM layout_images WHERE filename=?", (filename,))
+            if path:
+                db.after_commit(lambda: path.unlink(missing_ok=True))
 
     def reset_legacy_layout_images(self) -> None:
         from app.services.settings_service import settings

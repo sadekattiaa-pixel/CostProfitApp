@@ -19,7 +19,7 @@ from app.services.invoice_service import invoice_service, InvoiceError
 from app.services.supplier_service import supplier_service
 from app.services.settings_service import settings
 from app.services.product_service import product_service
-from app.services.export_service import (
+from app.services.export_service import (safe_filename,
     export_service,
     DEFAULT_INVOICE_SECTIONS,
     INVOICE_ITEM_COLUMNS,
@@ -29,6 +29,7 @@ from app.services.export_service import (
     SUPPLIER_FIELD_KEYS,
     DEFAULT_SUPPLIER_FIELDS,
 )
+from app.ui import PageControls
 from app.ui.theme import get_palette
 from app.ui.icons import make_icon
 from app.ui.pdf_preview import show_pdf_preview, BACK_TO_OPTIONS
@@ -511,7 +512,7 @@ def _preview_invoice_pdf(parent, full, language, theme):
         parent, language, theme,
         sections, columns, supplier_fields,
     )
-    default_name = f"{full['invoice_no']}_{date.today().isoformat()}.pdf"
+    default_name = f"{safe_filename(full['invoice_no'])}_{date.today().isoformat()}.pdf"
     while dlg.exec() == QDialog.DialogCode.Accepted:
         try:
             with TemporaryDirectory(prefix="costprofit-preview-") as temp_dir:
@@ -1020,6 +1021,9 @@ class ArchivePage(QWidget):
         table.verticalHeader().setDefaultSectionSize(62)
         table.itemDoubleClicked.connect(self._on_row_double_clicked)
         setattr(self, f"{prefix}table", table)
+        pager = PageControls(self.refresh, self)
+        setattr(self, f"{prefix}pager", pager)
+        layout.addWidget(pager)
         layout.addWidget(table, 1)
 
         empty_box = QFrame(); empty_box.setObjectName("EmptyBox")
@@ -1169,12 +1173,14 @@ class ArchivePage(QWidget):
             date_from = self.from_date.date().toString("yyyy-MM-dd")
             date_to = self.to_date.date().toString("yyyy-MM-dd")
 
-        rows = invoice_service.get_all(
-            status="archived", search=search, supplier_id=sup_id,
-            date_from=date_from, date_to=date_to, sort=sort,
-        )
+        filters = dict(status="archived", search=search, supplier_id=sup_id,
+                       date_from=date_from, date_to=date_to, sort=sort)
+        self._list_filters = filters
+        total = invoice_service.get_all(**filters, count_only=True)
+        self.pager.configure(filters, total, self.language)
+        rows = invoice_service.get_all(**filters, limit=self.pager.size, offset=self.pager.offset)
         self._fill_table(self.table, rows, is_draft=False)
-        self.counter.setText(_t("count", self.language, n=len(rows)))
+        self.counter.setText(_t("count", self.language, n=total))
 
         if not rows:
             self.table.setVisible(False)
@@ -1193,9 +1199,13 @@ class ArchivePage(QWidget):
         search = self.d_search_input.text().strip()
         sort = self.d_sort_combo.currentData() or "newest"
 
-        rows = invoice_service.get_all(status="draft", search=search, sort=sort)
+        filters = dict(status="draft", search=search, sort=sort)
+        self._list_filters = filters
+        total = invoice_service.get_all(**filters, count_only=True)
+        self.d_pager.configure(filters, total, self.language)
+        rows = invoice_service.get_all(**filters, limit=self.d_pager.size, offset=self.d_pager.offset)
         self._fill_table(self.d_table, rows, is_draft=True)
-        self.d_counter.setText(_t("count", self.language, n=len(rows)))
+        self.d_counter.setText(_t("count", self.language, n=total))
 
         if not rows:
             self.d_table.setVisible(False)
@@ -1214,7 +1224,7 @@ class ArchivePage(QWidget):
         self._visible_invoices = rows
         table.setRowCount(len(rows))
         for i, inv in enumerate(rows):
-            it = QTableWidgetItem(str(i + 1))
+            it = QTableWidgetItem(str((self.d_pager if is_draft else self.pager).offset + i + 1))
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(i, 0, it)
 
@@ -1357,7 +1367,7 @@ class ArchivePage(QWidget):
         selected_columns = dlg.get_columns()
         selected_supplier = dlg.get_supplier_fields()
 
-        default_name = f"{full['invoice_no']}_{date.today().isoformat()}.xlsx"
+        default_name = f"{safe_filename(full['invoice_no'])}_{date.today().isoformat()}.xlsx"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             _t("excel_save_title", self.language),
@@ -1396,7 +1406,7 @@ class ArchivePage(QWidget):
         return _load_default_supplier_fields()
 
     def _on_export_list(self):
-        rows = getattr(self, "_visible_invoices", [])
+        rows = invoice_service.get_all(**getattr(self, "_list_filters", {"status": self.current_status}))
         if not rows:
             QMessageBox.information(self, _t("info_title", self.language), _t("no_results", self.language));return
         path, selected = QFileDialog.getSaveFileName(self, _t("btn_export", self.language), "Invoices.xlsx", "Excel (*.xlsx);;PDF (*.pdf)")

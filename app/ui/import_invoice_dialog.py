@@ -76,7 +76,7 @@ class ImportInvoiceDialog(QDialog):
             self,
             "اختر ملف Excel",
             "",
-            "Excel Files (*.xlsx *.xls)"
+            "Excel Files (*.xlsx)"
         )
 
         if not path:

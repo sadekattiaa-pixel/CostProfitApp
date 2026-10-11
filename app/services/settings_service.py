@@ -43,7 +43,8 @@ class SettingsService:
         self._cache: dict[str, Any] = {}
 
     def get(self, key: str, default: Any = None) -> Any:
-        if key in self._cache:
+        transactional = db._conn is not None and db._conn.in_transaction
+        if not transactional and key in self._cache:
             return self._cache[key]
         row = db.query_one("SELECT value FROM settings WHERE key = ?", (key,))
         if row:
@@ -52,7 +53,8 @@ class SettingsService:
             value = DEFAULTS[key]
         else:
             value = default
-        self._cache[key] = value
+        if not transactional:
+            self._cache[key] = value
         return value
 
     def get_int(self, key: str, default: int = 0) -> int:
@@ -87,7 +89,8 @@ class SettingsService:
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (key, value),
                 )
-        self._cache.update(serialized)
+        for key in serialized:
+            self._cache.pop(key, None)
 
     def clear_cache(self) -> None:
         self._cache.clear()

@@ -1,5 +1,39 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import ast
+from PyInstaller.utils.win32.versioninfo import (
+    VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct, VarFileInfo, VarStruct,
+)
+
+# Read the canonical version without importing or starting the application.
+config_tree = ast.parse((Path(SPECPATH) / 'app' / 'config.py').read_text(encoding='utf-8-sig'))
+app_version = next(ast.literal_eval(node.value) for node in config_tree.body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'APP_VERSION' for target in node.targets))
+def config_literal(name):
+    return next(ast.literal_eval(node.value) for node in config_tree.body
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+app_author = config_literal('APP_AUTHOR')
+app_copyright = config_literal('APP_COPYRIGHT')
+version_tuple = tuple(int(part) for part in app_version.split('.')) + (0,)
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=version_tuple, prodvers=version_tuple,
+                      mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+    kids=[
+        StringFileInfo([StringTable('040904B0', [
+            StringStruct('CompanyName', app_author),
+            StringStruct('LegalCopyright', app_copyright),
+            StringStruct('FileDescription', 'Invoice'),
+            StringStruct('FileVersion', app_version),
+            StringStruct('InternalName', 'Invoice'),
+            StringStruct('OriginalFilename', 'Invoice.exe'),
+            StringStruct('ProductName', 'Invoice'),
+            StringStruct('ProductVersion', app_version),
+        ])]),
+        VarFileInfo([VarStruct('Translation', [0x0409, 1200])]),
+    ],
+)
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets', 'assets'), ('app/db/schema.sql', 'app/db')]
@@ -43,6 +77,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets/app_icon.ico'],
+    version=version_info,
 )
 coll = COLLECT(
     exe,
